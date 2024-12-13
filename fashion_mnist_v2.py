@@ -8,8 +8,11 @@ import matplotlib.pyplot as plt
 import os
 
 # Hyperparameters
+# Learning rates for Generator and Discriminator
+learning_rate_G = 5e-5
+learning_rate_D = 3e-5  # Lower learning rate for Discriminator
 batch_size = 64
-learning_rate = 5e-5
+# learning_rate = 5e-5
 epochs = 50
 latent_dim = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -17,9 +20,12 @@ print(f'Using device: {device}')
 
 # Data Preparation (Change dataset to FashionMNIST)
 transform = transforms.Compose([
+    transforms.RandomRotation(15),  # Random rotation between -15 to +15 degrees
+    transforms.RandomHorizontalFlip(),  # Random horizontal flip
     transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))  # Normalize FashionMNIST images
+    transforms.Normalize((0.5,), (0.5,))
 ])
+
 
 dataset = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -65,30 +71,53 @@ class Discriminator(nn.Module):
 #         # conv to 28x28 (1 feature map)
 #         return self.conv(x)
 
+# class Generator(nn.Module):
+#     def __init__(self, latent_dim):
+#         super().__init__()
+#         self.lin1 = nn.Linear(latent_dim, 7*7*64)  # [n, 256, 7, 7]
+#         self.up1 = nn.Upsample(scale_factor=2, mode='nearest')  # Nearest-neighbor upsampling
+#         self.conv1 = nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1)  # Regular convolution
+#         self.up2 = nn.Upsample(scale_factor=2, mode='nearest')  # Upsample again
+#         self.conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)  # Final output layer
+        
+#     def forward(self, x):
+#         x = self.lin1(x)
+#         x = F.relu(x)
+#         x = x.view(-1, 64, 7, 7)  # Reshape to 7x7x64
+#         x = self.up1(x)
+#         x = F.relu(self.conv1(x))
+#         x = self.up2(x)
+#         return torch.sigmoid(self.conv2(x))  # Final output
+
 class Generator(nn.Module):
     def __init__(self, latent_dim):
         super().__init__()
-        self.lin1 = nn.Linear(latent_dim, 7*7*64)  # [n, 256, 7, 7]
-        self.up1 = nn.Upsample(scale_factor=2, mode='nearest')  # Nearest-neighbor upsampling
-        self.conv1 = nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1)  # Regular convolution
-        self.up2 = nn.Upsample(scale_factor=2, mode='nearest')  # Upsample again
-        self.conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)  # Final output layer
-        
+        self.fc1 = nn.Linear(latent_dim, 256)
+        self.fc2 = nn.Linear(256, 512)
+        self.fc3 = nn.Linear(512, 1024)
+        self.fc4 = nn.Linear(1024, 7*7*128)  # Output a large feature map
+
+        self.conv1 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
+        self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
+        self.conv3 = nn.ConvTranspose2d(32, 1, kernel_size=3, stride=1, padding=1)  # Final layer to 28x28 image
+
     def forward(self, x):
-        x = self.lin1(x)
-        x = F.relu(x)
-        x = x.view(-1, 64, 7, 7)  # Reshape to 7x7x64
-        x = self.up1(x)
-        x = F.relu(self.conv1(x))
-        x = self.up2(x)
-        return torch.sigmoid(self.conv2(x))  # Final output
+        x = F.leaky_relu(self.fc1(x), 0.2)
+        x = F.leaky_relu(self.fc2(x), 0.2)
+        x = F.leaky_relu(self.fc3(x), 0.2)
+        x = F.leaky_relu(self.fc4(x), 0.2)
+
+        x = x.view(-1, 128, 7, 7)  # Reshape to 128 channels, 7x7
+        x = F.leaky_relu(self.conv1(x), 0.2)
+        x = F.leaky_relu(self.conv2(x), 0.2)
+        return torch.sigmoid(self.conv3(x))  # Output 28x28 image
 
 
 # Initialize Models
 generator = Generator(latent_dim).to(device)
 discriminator = Discriminator().to(device)
-optimizer_D = optim.Adam(discriminator.parameters(), lr=learning_rate)
-optimizer_G = optim.Adam(generator.parameters(), lr=learning_rate)
+optimizer_D = optim.Adam(discriminator.parameters(), lr=learning_rate_D)
+optimizer_G = optim.Adam(generator.parameters(), lr=learning_rate_G)
 criterion = nn.BCELoss()
 
 # Function to compare real and fake images side by side
@@ -133,7 +162,7 @@ for epoch in range(epochs):
         real_loss = criterion(real_output, real_labels)
 
         # Train Discriminator on fake data
-        fake_output = discriminator(fake.detach())
+        fake_output = discriminator(fake.detach())  # detach to avoid updating generator during this step
         fake_loss = criterion(fake_output, fake_labels)
 
         # Combine losses and backpropagate
@@ -141,14 +170,15 @@ for epoch in range(epochs):
         loss_D.backward()
         optimizer_D.step()
 
-        # Train Generator
-        optimizer_G.zero_grad()
-        fake_output = discriminator(fake)
-        loss_G = criterion(fake_output, real_labels)  # Generator wants discriminator to think fake is real
-        loss_G.backward()
-        optimizer_G.step()
+        # Train Generator after every 2 Discriminator updates
+        if batch_idx % 2 == 0:
+            optimizer_G.zero_grad()
+            fake_output = discriminator(fake)
+            loss_G = criterion(fake_output, real_labels)  # Generator wants discriminator to think fake is real
+            loss_G.backward()
+            optimizer_G.step()
 
-        # Every 100 batches, compare and display real vs fake images
+        # Print progress
         if batch_idx % 100 == 0:
             print(f"Epoch [{epoch+1}/{epochs}], Step [{batch_idx}/{len(data_loader)}], Loss D: {loss_D.item():.4f}, Loss G: {loss_G.item():.4f}")
             compare_images(real, fake, epoch, batch_idx)
