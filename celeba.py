@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 import os
+import matplotlib.pyplot as plt
 
 # Hyperparameters
 batch_size = 32
@@ -15,68 +15,70 @@ latent_dim = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f'Using device: {device}')
 
-# Data Preparation
+# Data Preparation for CelebA dataset
 transform = transforms.Compose([
+    transforms.Resize(64),  # Resize to 64x64
+    transforms.CenterCrop(64),  # Crop to 64x64
     transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
+    transforms.Normalize((0.5,), (0.5,))  # Normalize grayscale images with single channel
 ])
 
-dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+# dataset = datasets.CelebA(root='./data', split='train', download=True, transform=transform)
+# data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+dataset = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # Discriminator Model
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.conv2_drop = nn.Dropout()
-        self.fc1 = nn.Linear(320, 50)  # Adjust to match flattened dimensions
-        self.fc2 = nn.Linear(50, 1)
+# class Discriminator(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1)  # 64x64x3 -> 32x32x64
+#         self.conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)  # 32x32x64 -> 16x16x128
+#         self.conv3 = nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)  # 16x16x128 -> 8x8x256
+#         self.fc1 = nn.Linear(8*8*256, 1)  # Flatten and output single value for real/fake
 
-    def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x = x.view(x.size(0), -1)  # Flatten dynamically
-        x = F.relu(self.fc1(x))
-        x = F.dropout(x, training=self.training)
-        return torch.sigmoid(self.fc2(x))
+#     def forward(self, x):
+#         x = F.leaky_relu(self.conv1(x), 0.2)
+#         x = F.leaky_relu(self.conv2(x), 0.2)
+#         x = F.leaky_relu(self.conv3(x), 0.2)
+#         x = x.view(x.size(0), -1)  # Flatten the tensor
+#         x = torch.sigmoid(self.fc1(x))  # Sigmoid output for binary classification (real/fake)
+#         return x
 
 # Generator Model
 class Generator(nn.Module):
     def __init__(self, latent_dim):     
         super().__init__()
-        self.lin1 = nn.Linear(latent_dim, 7*7*64) # [n, 256, 7, 7]
-        self.ct1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2)  # [n,64, 16, 16]
-        self.ct2 = nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2)  # [n, 16, 34, 34]
-        self.conv = nn.Conv2d(16, 1, kernel_size=7) # [n, 1, 28, 28]
+        self.fc1 = nn.Linear(latent_dim, 256)
+        self.fc2 = nn.Linear(256, 512)
+        self.fc3 = nn.Linear(512, 1024)
+        self.fc4 = nn.Linear(1024, 3 * 64 * 64)  # Output size: 64x64x3 (RGB image)
 
     def forward(self, x):
-        # pass latent space input into the linear layer and reshape
-        x = self.lin1(x)
-        x = F.relu(x)
-        x = x.view(-1, 64, 7, 7) # 256
-        # upsample (transposed conv) 16x16 (64 feature maps)
-        x = self.ct1(x)
-        x = F.relu(x)
-        # upsample to 34x34 (16 feature map)
-        x = self.ct2(x)
-        x = F.relu(x)
-        # conv to 28x28 (1 feature map)
-        return self.conv(x)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
+        x = x.view(-1, 3, 64, 64)  # Reshape to 64x64x3
+        return torch.tanh(x)  # Output image should be in range [-1, 1]
 
 # Initialize Models
 generator = Generator(latent_dim).to(device)
 discriminator = Discriminator().to(device)
-optimizer_D = optim.Adam(discriminator.parameters(), lr=learning_rate)
-optimizer_G = optim.Adam(generator.parameters(), lr=learning_rate)
+
+# Optimizers
+optimizer_D = optim.Adam(discriminator.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+optimizer_G = optim.Adam(generator.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+
+# Loss function
 criterion = nn.BCELoss()
 
 # Training Loop
 for epoch in range(epochs):
     for batch_idx, (real, _) in enumerate(data_loader):
         # Prepare real and fake data
-        real = real.to(device)  # Shape: [batch_size, 1, 28, 28]
+        real = real.to(device)  # Shape: [batch_size, 3, 64, 64]
         batch_size = real.size(0)
 
         # Create labels
@@ -114,20 +116,20 @@ for epoch in range(epochs):
 print("Training complete!")
 
 # Save the trained generator and discriminator
-torch.save(generator.state_dict(), "generator.pth")
-torch.save(discriminator.state_dict(), "discriminator.pth")
+torch.save(generator.state_dict(), "generator_celeba.pth")
+torch.save(discriminator.state_dict(), "discriminator_celeba.pth")
 
 print("Models saved successfully!")
 
 # Generate and Save Samples
-def save_samples(generator, num_samples=16, latent_dim=100, save_dir="samples/new"):
+def save_samples(generator, num_samples=16, latent_dim=100, save_dir="samples/fashion_mnist"):
     os.makedirs(save_dir, exist_ok=True)
     generator.eval()
     with torch.no_grad():
         noise = torch.randn(num_samples, latent_dim).to(device)
         fake_images = generator(noise)
-        fake_images = fake_images.cpu().squeeze(1).clamp(0, 1)  # Remove channel dimension and clamp values
+        fake_images = fake_images.cpu().clamp(0, 1)  # Clamp values to [0, 1] range
         for i, img in enumerate(fake_images):
-            plt.imsave(f"{save_dir}/sample_{i+1}.png", img.numpy(), cmap="gray")
+            plt.imsave(f"{save_dir}/sample_{i+1}.png", img.permute(1, 2, 0).numpy())  # Save image as RGB
 
 save_samples(generator)

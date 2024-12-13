@@ -8,20 +8,20 @@ import matplotlib.pyplot as plt
 import os
 
 # Hyperparameters
-batch_size = 32
-learning_rate = 3e-4
+batch_size = 64
+learning_rate = 0.005
 epochs = 50
 latent_dim = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f'Using device: {device}')
 
-# Data Preparation
+# Data Preparation (Change dataset to FashionMNIST)
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
+    transforms.Normalize((0.5,), (0.5,))  # Normalize FashionMNIST images
 ])
 
-dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+dataset = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # Discriminator Model
@@ -42,28 +42,47 @@ class Discriminator(nn.Module):
         x = F.dropout(x, training=self.training)
         return torch.sigmoid(self.fc2(x))
 
-# Generator Model
-class Generator(nn.Module):
-    def __init__(self, latent_dim):     
-        super().__init__()
-        self.lin1 = nn.Linear(latent_dim, 7*7*64) # [n, 256, 7, 7]
-        self.ct1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2)  # [n,64, 16, 16]
-        self.ct2 = nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2)  # [n, 16, 34, 34]
-        self.conv = nn.Conv2d(16, 1, kernel_size=7) # [n, 1, 28, 28]
+# # Generator Model
+# class Generator(nn.Module):
+#     def __init__(self, latent_dim):     
+#         super().__init__()
+#         self.lin1 = nn.Linear(latent_dim, 7*7*64)  # [n, 256, 7, 7]
+#         self.ct1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2)  # [n,64, 16, 16]
+#         self.ct2 = nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2)  # [n, 16, 34, 34]
+#         self.conv = nn.Conv2d(16, 1, kernel_size=7)  # Output: [n, 1, 28, 28]
 
+#     def forward(self, x):
+#         # pass latent space input into the linear layer and reshape
+#         x = self.lin1(x)
+#         x = F.relu(x)
+#         x = x.view(-1, 64, 7, 7)  # 64 feature maps of size 7x7
+#         # upsample (transposed conv) 16x16 (64 feature maps)
+#         x = self.ct1(x)
+#         x = F.relu(x)
+#         # upsample to 28x28 (16 feature maps)
+#         x = self.ct2(x)
+#         x = F.relu(x)
+#         # conv to 28x28 (1 feature map)
+#         return self.conv(x)
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.lin1 = nn.Linear(latent_dim, 7*7*64)  # [n, 256, 7, 7]
+        self.up1 = nn.Upsample(scale_factor=2, mode='nearest')  # Nearest-neighbor upsampling
+        self.conv1 = nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1)  # Regular convolution
+        self.up2 = nn.Upsample(scale_factor=2, mode='nearest')  # Upsample again
+        self.conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)  # Final output layer
+        
     def forward(self, x):
-        # pass latent space input into the linear layer and reshape
         x = self.lin1(x)
         x = F.relu(x)
-        x = x.view(-1, 64, 7, 7) # 256
-        # upsample (transposed conv) 16x16 (64 feature maps)
-        x = self.ct1(x)
-        x = F.relu(x)
-        # upsample to 34x34 (16 feature map)
-        x = self.ct2(x)
-        x = F.relu(x)
-        # conv to 28x28 (1 feature map)
-        return self.conv(x)
+        x = x.view(-1, 64, 7, 7)  # Reshape to 7x7x64
+        x = self.up1(x)
+        x = F.relu(self.conv1(x))
+        x = self.up2(x)
+        return torch.sigmoid(self.conv2(x))  # Final output
+
 
 # Initialize Models
 generator = Generator(latent_dim).to(device)
@@ -71,6 +90,27 @@ discriminator = Discriminator().to(device)
 optimizer_D = optim.Adam(discriminator.parameters(), lr=learning_rate)
 optimizer_G = optim.Adam(generator.parameters(), lr=learning_rate)
 criterion = nn.BCELoss()
+
+# Function to compare real and fake images side by side
+def compare_images(real, fake, epoch, batch_idx, num_samples=8, save_dir="samples/mnist_fashion"):
+    # Ensure the directory exists
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Select a subset of real and fake images for display
+    real_images = real[:num_samples].cpu().detach()  # Detach the tensor
+    fake_images = fake[:num_samples].cpu().detach()  # Detach the tensor
+
+    # Plot real vs fake side by side
+    fig, axes = plt.subplots(2, num_samples, figsize=(10, 4))
+    for i in range(num_samples):
+        axes[0, i].imshow(real_images[i].squeeze(0), cmap='gray')
+        axes[0, i].axis('off')
+        axes[1, i].imshow(fake_images[i].squeeze(0), cmap='gray')
+        axes[1, i].axis('off')
+
+    # Save the comparison plot
+    plt.savefig(f"{save_dir}/e{epoch+1}_b{batch_idx}.png")
+    plt.close()
 
 # Training Loop
 for epoch in range(epochs):
@@ -108,8 +148,10 @@ for epoch in range(epochs):
         loss_G.backward()
         optimizer_G.step()
 
+        # Every 100 batches, compare and display real vs fake images
         if batch_idx % 100 == 0:
             print(f"Epoch [{epoch+1}/{epochs}], Step [{batch_idx}/{len(data_loader)}], Loss D: {loss_D.item():.4f}, Loss G: {loss_G.item():.4f}")
+            compare_images(real, fake, epoch, batch_idx)
 
 print("Training complete!")
 
@@ -120,7 +162,7 @@ torch.save(discriminator.state_dict(), "discriminator.pth")
 print("Models saved successfully!")
 
 # Generate and Save Samples
-def save_samples(generator, num_samples=16, latent_dim=100, save_dir="samples/new"):
+def save_samples(generator, num_samples=16, latent_dim=100, save_dir="samples/fashion"):
     os.makedirs(save_dir, exist_ok=True)
     generator.eval()
     with torch.no_grad():
